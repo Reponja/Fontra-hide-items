@@ -1514,7 +1514,10 @@ function withFlattenedPathHitTester(glyphController, hitTester, callback) {
 function patchPowerRuler(editor) {
   const tool = editor?.tools?.["power-ruler-tool"];
   if (!tool) {
-    return;
+    console.warn(
+      "Hide Items: the Power Ruler tool was not found; ruler filtering is inactive."
+    );
+    return false;
   }
 
   for (const methodName of ["recalcRulerFromPoint", "recalcRulerFromLine"]) {
@@ -1568,6 +1571,11 @@ function patchPowerRuler(editor) {
       );
     };
   }
+
+  console.info(
+    "Hide Items: loaded; the Power Ruler ignores hidden geometry."
+  );
+  return true;
 }
 
 function findPropertyDescriptor(object, propertyName) {

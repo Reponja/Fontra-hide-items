@@ -33,8 +33,19 @@ always shown when you leave edit mode.
    repository as `user/repo`.
 3. Reload the editor.
 
-Fontra fetches GitHub plugins through jsDelivr, so a fresh commit may take a
-short while to appear.
+Fontra fetches GitHub plugins through jsDelivr. jsDelivr asks browsers to cache
+files for up to seven days, and Fontra does not add a cache-busting query, so a
+browser can keep running an older `start.js` after a new commit. If an update
+does not seem to load, either clear the browser's cached web content and reload
+Fontra, or add the plugin with a full, version-pinned URL instead of
+`user/repo`, for example:
+
+```text
+https://cdn.jsdelivr.net/gh/user/repo@<commit-or-tag>
+```
+
+The local development server below sends `Cache-Control: no-store`, so it
+always loads the current files.
 
 ### From a local folder
 
@@ -92,6 +103,10 @@ Manager to uninstall it.
 - A contour with a hidden node is treated as open by the Power Ruler, so its
   intersections are measured but do not count as inside/outside when computing
   distances.
+- The plugin logs
+  `Hide Items: loaded; the Power Ruler ignores hidden geometry.` to the browser
+  console when the Power Ruler patch is active. If that line is missing, the
+  browser is probably running an older cached copy.
 - The plugin relies on Fontra's visualization layers, scene-model and Power
   Ruler internals.
   It is tested with Fontra 2026.10.0; a future Fontra version may require
