@@ -15,6 +15,9 @@ always shown when you leave edit mode.
   outline.
 - Hidden nodes are excluded from clicking, marquee selection, Select All,
   hovering and path hit-testing.
+- The Power Ruler ignores hidden nodes and contours: nearest-point snapping and
+  ray intersections behave as if the hidden geometry were not there. Existing
+  rulers update immediately when you hide or reveal items.
 - Hidden state is remembered per glyph across page reloads.
 - Hidden state is shared by all sources/layers of the same glyph.
 - Works with open and closed contours, quadratic and cubic curves, and
@@ -86,6 +89,10 @@ Manager to uninstall it.
   nodes and contours are.
 - Filling is skipped for a contour that has a hidden node, because filling the
   remaining open path would close the gap with an artificial straight edge.
-- The plugin relies on Fontra's visualization layers and scene-model internals.
+- A contour with a hidden node is treated as open by the Power Ruler, so its
+  intersections are measured but do not count as inside/outside when computing
+  distances.
+- The plugin relies on Fontra's visualization layers, scene-model and Power
+  Ruler internals.
   It is tested with Fontra 2026.10.0; a future Fontra version may require
   updates.

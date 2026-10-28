@@ -8,6 +8,7 @@
 // Hidden state is view-only. It is stored in localStorage, keyed by project
 // and glyph name, and never written into the font. Outside edit mode the full
 // glyph is always drawn, because the regular non-editing layers are untouched.
+// The Power Ruler also treats hidden nodes and contours as absent.
 
 const STORAGE_KEY = "fontra.hide-items.v1";
 const STORAGE_VERSION = 1;
@@ -1356,6 +1357,219 @@ function patchHitTesting(editor) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Power Ruler
+//
+// The Power Ruler measures against `glyphController.flattenedPathHitTester`.
+// Build a filtered view of that hit tester so hidden contours and segments are
+// absent from both nearest-point searches and ray intersections. Component
+// contours follow the glyph's own contours in the flattened path and are never
+// hideable, so they are passed through unchanged.
+// ---------------------------------------------------------------------------
+
+const FILTERED_HIT_TESTER = Symbol("fontra.hideItems.filteredHitTester");
+
+function getStateForGlyphController(glyphController) {
+  const glyphName = glyphController?.name;
+  const path = glyphController?.instance?.path;
+  if (glyphName === undefined || glyphName === null || !path) {
+    return null;
+  }
+  return getStateForGlyph(glyphName, path);
+}
+
+function makeFilteredFlattenedPathHitTester(glyphController, state) {
+  const hitTester = glyphController?.flattenedPathHitTester;
+  const ownPath = glyphController?.instance?.path;
+  if (
+    !hitTester ||
+    !Array.isArray(hitTester.contours) ||
+    !ownPath ||
+    typeof hitTester._ensureAllContoursAreLoaded !== "function" ||
+    typeof hitTester.findNearest !== "function" ||
+    typeof hitTester.rayIntersections !== "function"
+  ) {
+    return null;
+  }
+
+  // Loading all contours up front makes the filtered copies self-contained:
+  // the original tester will not try to reload segments while we swap its
+  // contour list.
+  hitTester._ensureAllContoursAreLoaded();
+
+  const hiddenInfo = makeHiddenInfo(ownPath, state);
+  const filteredContours = [];
+  for (
+    let contourIndex = 0;
+    contourIndex < hitTester.contours.length;
+    contourIndex++
+  ) {
+    const contour = hitTester.contours[contourIndex];
+
+    // Component contours follow the glyph's own contours and are not hideable.
+    if (contourIndex >= ownPath.numContours) {
+      filteredContours.push(contour);
+      continue;
+    }
+
+    if (hiddenInfo.isContourHidden(contourIndex)) {
+      continue;
+    }
+
+    const [startPoint, endPoint] = contourRange(ownPath, contourIndex);
+    let hasHiddenPoint = false;
+    for (let pointIndex = startPoint; pointIndex <= endPoint; pointIndex++) {
+      if (hiddenInfo.isPointHidden(pointIndex)) {
+        hasHiddenPoint = true;
+        break;
+      }
+    }
+    if (!hasHiddenPoint) {
+      filteredContours.push(contour);
+      continue;
+    }
+
+    const visibleSegments = [];
+    for (const segment of contour.segments || []) {
+      const parentPointIndices = segment.parentPointIndices || [];
+      let visible = true;
+      for (const pointIndex of parentPointIndices) {
+        if (hiddenInfo.isPointHidden(pointIndex)) {
+          visible = false;
+          break;
+        }
+      }
+      if (visible) {
+        visibleSegments.push(segment);
+      }
+    }
+
+    // A contour with a gap is open, so its intersections must not contribute
+    // inside/outside winding to the ruler's measurements.
+    filteredContours.push({
+      ...contour,
+      isClosed: false,
+      segments: visibleSegments,
+    });
+  }
+
+  const withFilteredContours = (callback) => {
+    const originalContours = hitTester.contours;
+    hitTester.contours = filteredContours;
+    try {
+      return callback();
+    } finally {
+      hitTester.contours = originalContours;
+    }
+  };
+
+  return {
+    [FILTERED_HIT_TESTER]: true,
+    findNearest(point, extraLines) {
+      return withFilteredContours(() =>
+        hitTester.findNearest(point, extraLines)
+      );
+    },
+    rayIntersections(point, direction, extraLines) {
+      return withFilteredContours(() =>
+        hitTester.rayIntersections(point, direction, extraLines)
+      );
+    },
+    lineIntersections(p1, p2, direction, extraLines) {
+      return withFilteredContours(() =>
+        hitTester.lineIntersections(p1, p2, direction, extraLines)
+      );
+    },
+    hitTest(point, margin) {
+      return withFilteredContours(() => hitTester.hitTest(point, margin));
+    },
+  };
+}
+
+function withFlattenedPathHitTester(glyphController, hitTester, callback) {
+  const originalDescriptor = Object.getOwnPropertyDescriptor(
+    glyphController,
+    "flattenedPathHitTester"
+  );
+  Object.defineProperty(glyphController, "flattenedPathHitTester", {
+    configurable: true,
+    enumerable: false,
+    value: hitTester,
+  });
+  try {
+    return callback();
+  } finally {
+    if (originalDescriptor) {
+      Object.defineProperty(
+        glyphController,
+        "flattenedPathHitTester",
+        originalDescriptor
+      );
+    } else {
+      delete glyphController.flattenedPathHitTester;
+    }
+  }
+}
+
+function patchPowerRuler(editor) {
+  const tool = editor?.tools?.["power-ruler-tool"];
+  if (!tool) {
+    return;
+  }
+
+  for (const methodName of ["recalcRulerFromPoint", "recalcRulerFromLine"]) {
+    const originalMethod = tool[methodName];
+    if (typeof originalMethod !== "function") {
+      continue;
+    }
+    tool[methodName] = function (glyphController, ...args) {
+      // recalcRulerFromPoint calls recalcRulerFromLine with the same
+      // controller. The inner call sees the already-filtered tester and must
+      // not filter it a second time.
+      if (
+        !glyphController ||
+        glyphController.flattenedPathHitTester?.[FILTERED_HIT_TESTER]
+      ) {
+        return originalMethod.call(this, glyphController, ...args);
+      }
+
+      let filteredHitTester = null;
+      try {
+        const state = getStateForGlyphController(glyphController);
+        if (state) {
+          filteredHitTester = makeFilteredFlattenedPathHitTester(
+            glyphController,
+            state
+          );
+        }
+      } catch (error) {
+        console.warn(
+          "Hide Items: could not filter the Power Ruler.",
+          error
+        );
+        return originalMethod.call(this, glyphController, ...args);
+      }
+
+      const ownDescriptor = Object.getOwnPropertyDescriptor(
+        glyphController,
+        "flattenedPathHitTester"
+      );
+      if (
+        !filteredHitTester ||
+        !Object.isExtensible(glyphController) ||
+        (ownDescriptor && !ownDescriptor.configurable)
+      ) {
+        return originalMethod.call(this, glyphController, ...args);
+      }
+      return withFlattenedPathHitTester(
+        glyphController,
+        filteredHitTester,
+        () => originalMethod.call(this, glyphController, ...args)
+      );
+    };
+  }
+}
+
 function findPropertyDescriptor(object, propertyName) {
   let prototype = Object.getPrototypeOf(object);
   while (prototype) {
@@ -1759,10 +1973,29 @@ function canRevealAll(editor) {
   return hasStoredState(positionedGlyph.glyphName);
 }
 
+function refreshPowerRuler(editor) {
+  const tool = editor?.tools?.["power-ruler-tool"];
+  if (!tool || typeof tool.recalc !== "function") {
+    return;
+  }
+  try {
+    const result = tool.recalc();
+    if (result && typeof result.catch === "function") {
+      result.catch((error) => {
+        console.warn("Hide Items: could not refresh the Power Ruler.", error);
+      });
+    }
+  } catch (error) {
+    console.warn("Hide Items: could not refresh the Power Ruler.", error);
+  }
+}
+
 function requestUpdate(editor) {
   editor.visualizationLayers?.requestUpdate?.();
   editor.canvasController?.requestUpdate?.();
   editor.sceneController?.canvasController?.requestUpdate?.();
+  // Existing rulers must be recalculated against the new hidden state.
+  refreshPowerRuler(editor);
 }
 
 // ---------------------------------------------------------------------------
@@ -1871,6 +2104,11 @@ export function start(editor, _pluginPath) {
 
   patchVisualizationLayers(editor);
   patchHitTesting(editor);
+  try {
+    patchPowerRuler(editor);
+  } catch (error) {
+    console.warn("Hide Items: could not patch the Power Ruler.", error);
+  }
   patchSelection(editor);
   patchSelectAll(editor);
   installMenu(editor);
