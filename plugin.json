@@ -1,0 +1,5 @@
+{
+  "name": "Hide Items",
+  "init": "./start.js",
+  "function": "start"
+}
